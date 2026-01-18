@@ -1,0 +1,5 @@
+2026-01-18 19:25:12 | D:\Scripts\DelDuplicator\dest\2.txt | D:\Scripts\DelDuplicator\dest\2_COPY_9f06243a.txt
+2026-01-18 19:35:50 | D:\Scripts\DelDuplicator\dest\3_COPY_9f06243a_COPY_9f06243a.txt | D:\Scripts\DelDuplicator\dest\3_COPY_9f06243a_COPY_9f06243a_COPY_9f06243a.txt
+2026-01-18 19:35:50 | D:\Scripts\DelDuplicator\dest\1.txt | D:\Scripts\DelDuplicator\dest\1_COPY_9f06243a.txt
+2026-01-18 19:35:50 | D:\Scripts\DelDuplicator\dest\2.txt | D:\Scripts\DelDuplicator\dest\2_COPY_9f06243a.txt
+2026-01-18 19:35:50 | D:\Scripts\DelDuplicator\B.txt | D:\Scripts\DelDuplicator\dest\B.txt
