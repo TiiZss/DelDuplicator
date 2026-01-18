@@ -6,8 +6,7 @@ Script profesional para la detección y eliminación (o movimiento seguro) de ar
 ![License](https://img.shields.io/github/license/TiiZss/DelDuplicator?style=flat-square)
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue?style=flat-square)
 ![Status](https://img.shields.io/badge/Status-Stable-green?style=flat-square)
-
-<a href="https://www.buymeacoffee.com/TiiZss" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" style="height: 60px !important;width: 217px !important;" ></a>
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-ffdd00?style=flat-square&logo=buy-me-a-coffee&logoColor=black)](https://www.buymeacoffee.com/TiiZss)
 
 ## 🚀 Características
 
@@ -66,6 +65,14 @@ Consulta el [CHANGELOG.md](CHANGELOG.md) para ver el historial de cambios.
 ## 📄 Licencia
 
 Este proyecto está bajo la Licencia MIT - mira el archivo [LICENSE](LICENSE) para detalles.
+
+## 🤝 Contribuir y Apoyo
+
+¿Te ha sido útil este proyecto? ¡Considera invitarme a un café para mantener el código despierto! ☕
+
+Tu apoyo ayuda a mantener las actualizaciones y crear nuevas herramientas open source.
+
+<a href="https://www.buymeacoffee.com/TiiZss" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" style="height: 60px !important;width: 217px !important;" ></a>
 
 ---
 Hecho con ❤️ por [TiiZss](https://github.com/TiiZss)
