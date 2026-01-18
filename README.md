@@ -37,7 +37,6 @@ Script profesional para la detección y eliminación (o movimiento seguro) de ar
 Simplemente haz doble clic en **`start_gui.bat`**.
 
 ![GUI Screenshot](https://raw.githubusercontent.com/TiiZss/DelDuplicator/master/gui_preview.png)
-*(Nota: Añade una captura si lo deseas)*
 
 ### Línea de Comandos
 
