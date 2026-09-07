@@ -233,7 +233,7 @@ def _phase_prune_db(conn, cursor, scan_time):
 def _phase_calculate_hashes(conn, cursor):
     print(">> FASE 3: Calculando hashes (solo colisiones de tamaño)...")
     cursor.execute(
-        "SELECT count(*) FROM files WHERE hash IS NULL AND size IN (SELECT size FROM files GROUP BY size HAVING count(*) > 1)"
+        "SELECT count(*) FROM files WHERE (hash IS NULL OR hash = '') AND size IN (SELECT size FROM files GROUP BY size HAVING count(*) > 1)"
     )
     row_count = cursor.fetchone()
     total_to_hash = row_count[0] if row_count else 0
@@ -246,7 +246,7 @@ def _phase_calculate_hashes(conn, cursor):
     print(f"   -> Necesario calcular hash de {total_to_hash} archivos candidatos...")
     while True:
         cursor.execute(
-            "SELECT path FROM files WHERE hash IS NULL AND size IN (SELECT size FROM files GROUP BY size HAVING count(*) > 1) LIMIT 100"
+            "SELECT path FROM files WHERE (hash IS NULL OR hash = '') AND size IN (SELECT size FROM files GROUP BY size HAVING count(*) > 1) LIMIT 100"
         )
         batch = cursor.fetchall()
         if not batch:
@@ -259,8 +259,11 @@ def _phase_calculate_hashes(conn, cursor):
             print_progress(hashes_calculated, total_to_hash, prefix='Hashing:', suffix=f'{fname}', length=30)
 
             sha256_val = calcular_hash_sha256(path_str)
-            if sha256_val:
+            if sha256_val is not None:
                 cursor.execute("UPDATE files SET hash=? WHERE path=?", (sha256_val, path_str))
+            else:
+                # Evita bucles infinitos si el archivo no se puede leer.
+                cursor.execute("UPDATE files SET hash='' WHERE path=?", (path_str,))
 
             hashes_calculated += 1
 
