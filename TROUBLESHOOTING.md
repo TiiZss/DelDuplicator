@@ -8,8 +8,10 @@ Sintoma:
 
 Accion:
 
-- Usar la carpeta graft/ como mapa local.
-- Verificar si el servidor MCP de graft esta configurado en .mcp.json.
+- Si existe la carpeta graft/, usarla como mapa local.
+- Si no existe la carpeta graft/, usar AGENTS.md como guia y configurar el servidor MCP en .mcp.json.
+
+## 2) Errores de codificacion (cp1252 vs UTF-8)
 
 Sintoma:
 

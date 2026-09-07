@@ -163,13 +163,13 @@ def _iter_eligible_files(ruta_base, script_path, db_path, path_mover_abs, includ
         if not _is_indexable_regular_file(archivo_actual):
             continue
 
-        resolved_path = archivo_actual.resolve()
-        if _is_protected_path(resolved_path, script_path, db_resolved, path_mover_abs):
-            continue
-
         try:
+            resolved_path = archivo_actual.resolve()
             stat = archivo_actual.stat()
         except OSError:
+            continue
+
+        if _is_protected_path(resolved_path, script_path, db_resolved, path_mover_abs):
             continue
 
         if not _passes_file_property_filters(archivo_actual, stat, include_exts, exclude_exts):
