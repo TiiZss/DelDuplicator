@@ -276,16 +276,24 @@ def _phase_calculate_hashes(conn, cursor):
 
 
 def _sort_duplicate_candidates(candidates, script_path):
-    match_copy_regex = re.compile(r' \(\d+\)$')
+    match_copy_regex = re.compile(r' \((\d+)\)$')
+
+    def copy_index(path_obj, copy_regex=match_copy_regex):
+        match = copy_regex.search(path_obj.stem)
+        if not match:
+            return None
+        return int(match.group(1))
 
     def sort_key(item, script_abs=script_path, copy_regex=match_copy_regex):
         p = item['path']
         is_script = p.resolve() == script_abs
-        has_copy_pattern = bool(copy_regex.search(p.stem))
+        idx = copy_index(p, copy_regex)
+        has_copy_pattern = idx is not None
         mtime = item['mtime']
         prio_script = 0 if is_script else 1
         prio_pattern = 1 if has_copy_pattern else 0
-        return (prio_script, prio_pattern, mtime)
+        prio_copy_index = idx if idx is not None else float('inf')
+        return (prio_script, prio_pattern, prio_copy_index, mtime)
 
     candidates.sort(key=sort_key)
 
