@@ -14,8 +14,16 @@ import time
 import platform
 from pathlib import Path
 
+try:
+    import xxhash
+except ImportError:
+    xxhash = None
+
 # --- CONFIGURACIÓN DB ---
 DEFAULT_DB_NAME = "delduplicator.db"
+QUICK_SAMPLE_BYTES = 4096
+HEAD_UNIQUE_PREFIX = "__HEAD_UNIQUE__"
+HASH_ERROR_PREFIX = "__HASH_ERROR__"
 
 # --- LISTA NEGRA DE DIRECTORIOS (Seguridad) ---
 SYSTEM_DIRS = {
@@ -63,6 +71,50 @@ def calcular_hash_sha256(ruta_archivo):
         return sha256.hexdigest()
     except OSError:
         return None
+
+
+def calcular_firma_rapida(ruta_archivo):
+    """
+    Firma rápida de los primeros 4KB para filtrar antes del hash completo.
+    """
+    try:
+        with open(ruta_archivo, "rb") as f:
+            head = f.read(QUICK_SAMPLE_BYTES)
+    except OSError:
+        return None
+
+    if xxhash is not None:
+        return xxhash.xxh3_128_hexdigest(head)
+    return hashlib.blake2b(head, digest_size=16).hexdigest()
+
+
+def calcular_hash_completo(ruta_archivo):
+    """
+    Hash completo: XXH3-128 si está disponible, con fallback a SHA-256.
+    """
+    if xxhash is None:
+        sha256_val = calcular_hash_sha256(ruta_archivo)
+        if sha256_val is None:
+            return None
+        return f"sha256:{sha256_val}"
+
+    h = xxhash.xxh3_128()
+    bloque_size = 65536
+    try:
+        with open(ruta_archivo, "rb") as f:
+            while True:
+                bloque = f.read(bloque_size)
+                if not bloque:
+                    break
+                h.update(bloque)
+    except OSError:
+        return None
+    return f"xxh3_128:{h.hexdigest()}"
+
+
+def _build_hash_error_marker(path_str):
+    digest = hashlib.sha256(path_str.encode("utf-8")).hexdigest()
+    return f"{HASH_ERROR_PREFIX}:{digest}"
 
 def limpiar_log_obsoleto(log_path):
     """
@@ -231,48 +283,82 @@ def _phase_prune_db(conn, cursor, scan_time):
 
 
 def _phase_calculate_hashes(conn, cursor):
-    print(">> FASE 3: Calculando hashes (solo colisiones de tamaño)...")
+    print(">> FASE 3: Filtro por cabecera y hash en colisiones reales...")
+    pending_predicate = (
+        f"(hash IS NULL OR hash = '' OR hash LIKE '{HEAD_UNIQUE_PREFIX}:%')"
+    )
+
     cursor.execute(
-        "SELECT count(*) FROM files WHERE (hash IS NULL OR hash = '') AND size IN (SELECT size FROM files GROUP BY size HAVING count(*) > 1)"
+        f"SELECT count(*) FROM files WHERE {pending_predicate} "
+        "AND size IN (SELECT size FROM files GROUP BY size HAVING count(*) > 1)"
     )
     row_count = cursor.fetchone()
-    total_to_hash = row_count[0] if row_count else 0
+    total_candidates = row_count[0] if row_count else 0
 
+    processed_candidates = 0
     hashes_calculated = 0
-    if total_to_hash <= 0:
-        print(f"   -> Hashes nuevos calculados: {hashes_calculated}")
+
+    if total_candidates <= 0:
+        print(f"   -> Hashes completos calculados: {hashes_calculated}")
         return
 
-    print(f"   -> Necesario calcular hash de {total_to_hash} archivos candidatos...")
-    while True:
-        cursor.execute(
-            "SELECT path FROM files WHERE (hash IS NULL OR hash = '') AND size IN (SELECT size FROM files GROUP BY size HAVING count(*) > 1) LIMIT 100"
-        )
-        batch = cursor.fetchall()
-        if not batch:
-            break
+    print(f"   -> Candidatos por tamaño: {total_candidates}")
+    cursor.execute("SELECT size FROM files GROUP BY size HAVING count(*) > 1")
+    duplicate_sizes = [row[0] for row in cursor.fetchall()]
 
-        for (path_str,) in batch:
-            fname = os.path.basename(path_str)
-            if len(fname) > 20:
-                fname = fname[:17] + "..."
-            print_progress(hashes_calculated, total_to_hash, prefix='Hashing:', suffix=f'{fname}', length=30)
+    for file_size in duplicate_sizes:
+        cursor.execute("SELECT path, hash FROM files WHERE size = ?", (file_size,))
+        size_group = cursor.fetchall()
 
-            sha256_val = calcular_hash_sha256(path_str)
-            if sha256_val is not None:
-                cursor.execute("UPDATE files SET hash=? WHERE path=?", (sha256_val, path_str))
-            else:
-                # Marca el fallo con un valor único para evitar reintentos infinitos.
-                error_marker = f"__HASH_ERROR__:{hashlib.sha256(path_str.encode('utf-8')).hexdigest()}"
-                cursor.execute("UPDATE files SET hash=? WHERE path=?", (error_marker, path_str))
+        quick_groups = {}
+        for path_str, current_hash in size_group:
+            quick_sig = calcular_firma_rapida(path_str)
+            if quick_sig is None:
+                error_marker = _build_hash_error_marker(path_str)
+                if current_hash != error_marker:
+                    cursor.execute("UPDATE files SET hash=? WHERE path=?", (error_marker, path_str))
+                continue
 
-            hashes_calculated += 1
+            quick_groups.setdefault(quick_sig, []).append((path_str, current_hash))
+
+        for quick_sig, group_files in quick_groups.items():
+            if len(group_files) == 1:
+                path_str, current_hash = group_files[0]
+                unique_marker = f"{HEAD_UNIQUE_PREFIX}:{file_size}:{quick_sig}"
+                if current_hash != unique_marker:
+                    cursor.execute("UPDATE files SET hash=? WHERE path=?", (unique_marker, path_str))
+
+                if current_hash is None or current_hash == '' or current_hash.startswith(f"{HEAD_UNIQUE_PREFIX}:"):
+                    processed_candidates += 1
+                    fname = os.path.basename(path_str)
+                    if len(fname) > 20:
+                        fname = fname[:17] + "..."
+                    print_progress(processed_candidates, total_candidates, prefix='Hashing:', suffix=f'{fname}', length=30)
+                continue
+
+            for path_str, current_hash in group_files:
+                if current_hash is None or current_hash == '' or current_hash.startswith(f"{HEAD_UNIQUE_PREFIX}:"):
+                    processed_candidates += 1
+
+                fname = os.path.basename(path_str)
+                if len(fname) > 20:
+                    fname = fname[:17] + "..."
+                print_progress(processed_candidates, total_candidates, prefix='Hashing:', suffix=f'{fname}', length=30)
+
+                full_hash = calcular_hash_completo(path_str)
+                if full_hash is None:
+                    full_hash = _build_hash_error_marker(path_str)
+                else:
+                    hashes_calculated += 1
+
+                if current_hash != full_hash:
+                    cursor.execute("UPDATE files SET hash=? WHERE path=?", (full_hash, path_str))
 
         conn.commit()
 
-    print_progress(total_to_hash, total_to_hash, prefix='Hashing:', suffix='Completado', length=30)
+    print_progress(total_candidates, total_candidates, prefix='Hashing:', suffix='Completado', length=30)
     print()
-    print(f"   -> Hashes nuevos calculados: {hashes_calculated}")
+    print(f"   -> Hashes completos calculados: {hashes_calculated}")
 
 
 def _sort_duplicate_candidates(candidates, script_path):
@@ -332,7 +418,14 @@ def _move_or_delete_duplicate(mover_a, borrar_realmente, file_hash, archivo_dele
 
 def _phase_deduplicate(conn, cursor, mover_a, borrar_realmente, script_path):
     print(">> FASE 4: Analizando duplicados...")
-    cursor.execute("SELECT hash, count(*) as cnt FROM files WHERE hash IS NOT NULL GROUP BY hash HAVING cnt > 1")
+    cursor.execute(
+        f"SELECT hash, count(*) as cnt FROM files "
+        "WHERE hash IS NOT NULL "
+        "AND hash <> '' "
+        f"AND hash NOT LIKE '{HASH_ERROR_PREFIX}:%' "
+        f"AND hash NOT LIKE '{HEAD_UNIQUE_PREFIX}:%' "
+        "GROUP BY hash HAVING cnt > 1"
+    )
     duplicate_blocks = cursor.fetchall()
 
     contador_duplicados = 0
