@@ -1,6 +1,6 @@
 # TROUBLESHOOTING
 
-## 1) El comando graft no funciona
+## 1) El comando `graft` no funciona
 
 Sintoma:
 
@@ -8,8 +8,9 @@ Sintoma:
 
 Accion:
 
-- Si existe la carpeta graft/, usarla como mapa local.
-- Si no existe la carpeta graft/, usar AGENTS.md como guia y configurar el servidor MCP en .mcp.json.
+- En algunos checkouts puede no estar disponible `graft/`.
+- Si existe `graft/`, usarla como mapa local.
+- Si no existe `graft/`, usar `AGENTS.md` como guia y configurar el servidor MCP en `.mcp.json`.
 
 ## 2) Errores de codificacion (cp1252 vs UTF-8)
 

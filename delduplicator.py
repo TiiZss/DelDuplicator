@@ -262,8 +262,9 @@ def _phase_calculate_hashes(conn, cursor):
             if sha256_val is not None:
                 cursor.execute("UPDATE files SET hash=? WHERE path=?", (sha256_val, path_str))
             else:
-                # Evita bucles infinitos si el archivo no se puede leer.
-                cursor.execute("UPDATE files SET hash='' WHERE path=?", (path_str,))
+                # Marca el fallo con un valor único para evitar reintentos infinitos.
+                error_marker = f"__HASH_ERROR__:{hashlib.sha256(path_str.encode('utf-8')).hexdigest()}"
+                cursor.execute("UPDATE files SET hash=? WHERE path=?", (error_marker, path_str))
 
             hashes_calculated += 1
 
