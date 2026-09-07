@@ -12,10 +12,14 @@ import os
 import re
 import signal
 
+APP_VERSION = "3.1.1"
+GUI_SUBVERSION = "GUI.1"
+
+
 class DelDuplicatorGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("DelDuplicator V3 - Interfaz Gráfica Pro")
+        self.root.title(f"DelDuplicator v{APP_VERSION} ({GUI_SUBVERSION}) - Interfaz Gráfica Pro")
         self.root.geometry("850x700")
         
         style = ttk.Style()
@@ -201,14 +205,21 @@ class DelDuplicatorGUI:
             regex_progress = re.compile(r"\|[^|]*\|\s+(\d+(?:\.\d+)?)%")
             
             for line in self.current_process.stdout:
-                line_clean = line.strip()
-                if "Hashing: |" in line_clean:
-                    match = regex_progress.search(line_clean)
-                    if match:
-                        p = float(match.group(1))
-                        self.root.after(0, self.update_progress, p)
-                else:
-                    self.root.after(0, self.log, line_clean)
+                # print_progress usa '\r' para refrescar la misma linea; ignoramos
+                # fragmentos vacios para no llenar la salida con lineas en blanco.
+                fragments = line.split('\r')
+                for fragment in fragments:
+                    line_clean = fragment.strip()
+                    if not line_clean:
+                        continue
+
+                    if "Hashing: |" in line_clean:
+                        match = regex_progress.search(line_clean)
+                        if match:
+                            p = float(match.group(1))
+                            self.root.after(0, self.update_progress, p)
+                    else:
+                        self.root.after(0, self.log, line_clean)
             
             self.current_process.wait()
             self.current_process = None
