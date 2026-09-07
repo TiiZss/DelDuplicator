@@ -22,8 +22,6 @@ except ImportError:
 # --- CONFIGURACIÓN DB ---
 DEFAULT_DB_NAME = "delduplicator.db"
 QUICK_SAMPLE_BYTES = 4096
-HEAD_UNIQUE_PREFIX = "__HEAD_UNIQUE__"
-HASH_ERROR_PREFIX = "__HASH_ERROR__"
 
 # --- LISTA NEGRA DE DIRECTORIOS (Seguridad) ---
 SYSTEM_DIRS = {
@@ -44,10 +42,20 @@ def init_db(db_path):
             path TEXT PRIMARY KEY,
             size INTEGER,
             mtime REAL,
-            hash TEXT,
+            hash BLOB,
+            hash_error INTEGER DEFAULT 0,
             last_seen REAL
         )
     ''')
+    # Migración ligera para bases previas (hash TEXT sin hash_error).
+    c.execute("PRAGMA table_info(files)")
+    cols = {row[1] for row in c.fetchall()}
+    if "hash_error" not in cols:
+        c.execute("ALTER TABLE files ADD COLUMN hash_error INTEGER DEFAULT 0")
+
+    # Si hay hashes en texto de versiones previas, forzamos recálculo binario.
+    c.execute("UPDATE files SET hash = NULL, hash_error = 0 WHERE typeof(hash) = 'text'")
+
     # Índices para acelerar búsquedas
     c.execute('CREATE INDEX IF NOT EXISTS idx_size ON files (size)')
     c.execute('CREATE INDEX IF NOT EXISTS idx_hash ON files (hash)')
@@ -68,7 +76,7 @@ def calcular_hash_sha256(ruta_archivo):
                 if not bloque:
                     break
                 sha256.update(bloque)
-        return sha256.hexdigest()
+        return sha256.digest()
     except OSError:
         return None
 
@@ -84,19 +92,16 @@ def calcular_firma_rapida(ruta_archivo):
         return None
 
     if xxhash is not None:
-        return xxhash.xxh3_128_hexdigest(head)
-    return hashlib.blake2b(head, digest_size=16).hexdigest()
+        return xxhash.xxh3_128_digest(head)
+    return hashlib.blake2b(head, digest_size=16).digest()
 
 
 def calcular_hash_completo(ruta_archivo):
     """
-    Hash completo: XXH3-128 si está disponible, con fallback a SHA-256.
+    Hash completo en binario: XXH3-128 si está disponible, fallback SHA-256.
     """
     if xxhash is None:
-        sha256_val = calcular_hash_sha256(ruta_archivo)
-        if sha256_val is None:
-            return None
-        return f"sha256:{sha256_val}"
+        return calcular_hash_sha256(ruta_archivo)
 
     h = xxhash.xxh3_128()
     bloque_size = 65536
@@ -109,12 +114,7 @@ def calcular_hash_completo(ruta_archivo):
                 h.update(bloque)
     except OSError:
         return None
-    return f"xxh3_128:{h.hexdigest()}"
-
-
-def _build_hash_error_marker(path_str):
-    digest = hashlib.sha256(path_str.encode("utf-8")).hexdigest()
-    return f"{HASH_ERROR_PREFIX}:{digest}"
+    return h.digest()
 
 def limpiar_log_obsoleto(log_path):
     """
@@ -237,8 +237,8 @@ def _phase_index_files(conn, cursor, ruta_base, script_path, db_path, path_mover
     batch_size = 1000
 
     sql_select = "SELECT size, mtime, hash FROM files WHERE path = ?"
-    sql_insert = "INSERT INTO files (path, size, mtime, hash, last_seen) VALUES (?, ?, ?, ?, ?)"
-    sql_update = "UPDATE files SET size=?, mtime=?, hash=?, last_seen=? WHERE path=?"
+    sql_insert = "INSERT INTO files (path, size, mtime, hash, hash_error, last_seen) VALUES (?, ?, ?, ?, ?, ?)"
+    sql_update = "UPDATE files SET size=?, mtime=?, hash=?, hash_error=?, last_seen=? WHERE path=?"
     sql_touch = "UPDATE files SET last_seen=? WHERE path=?"
 
     for resolved_path, stat in _iter_eligible_files(
@@ -258,11 +258,11 @@ def _phase_index_files(conn, cursor, ruta_base, script_path, db_path, path_mover
         if row:
             db_size, db_mtime, _ = row
             if size != db_size or abs(mtime - db_mtime) > 0.001:
-                cursor.execute(sql_update, (size, mtime, None, scan_time, path_str))
+                cursor.execute(sql_update, (size, mtime, None, 0, scan_time, path_str))
             else:
                 cursor.execute(sql_touch, (scan_time, path_str))
         else:
-            cursor.execute(sql_insert, (path_str, size, mtime, None, scan_time))
+            cursor.execute(sql_insert, (path_str, size, mtime, None, 0, scan_time))
 
         count_scanned += 1
         if count_scanned % batch_size == 0:
@@ -284,9 +284,7 @@ def _phase_prune_db(conn, cursor, scan_time):
 
 def _phase_calculate_hashes(conn, cursor):
     print(">> FASE 3: Filtro por cabecera y hash en colisiones reales...")
-    pending_predicate = (
-        f"(hash IS NULL OR hash = '' OR hash LIKE '{HEAD_UNIQUE_PREFIX}:%')"
-    )
+    pending_predicate = "(hash IS NULL AND hash_error = 0)"
 
     cursor.execute(
         f"SELECT count(*) FROM files WHERE {pending_predicate} "
@@ -307,28 +305,31 @@ def _phase_calculate_hashes(conn, cursor):
     duplicate_sizes = [row[0] for row in cursor.fetchall()]
 
     for file_size in duplicate_sizes:
-        cursor.execute("SELECT path, hash FROM files WHERE size = ?", (file_size,))
+        cursor.execute("SELECT path, hash, hash_error FROM files WHERE size = ?", (file_size,))
         size_group = cursor.fetchall()
 
         quick_groups = {}
-        for path_str, current_hash in size_group:
+        for path_str, _, _ in size_group:
             quick_sig = calcular_firma_rapida(path_str)
             if quick_sig is None:
-                error_marker = _build_hash_error_marker(path_str)
-                if current_hash != error_marker:
-                    cursor.execute("UPDATE files SET hash=? WHERE path=?", (error_marker, path_str))
+                cursor.execute("UPDATE files SET hash=NULL, hash_error=1 WHERE path=?", (path_str,))
                 continue
 
-            quick_groups.setdefault(quick_sig, []).append((path_str, current_hash))
+            quick_groups.setdefault(quick_sig, []).append(path_str)
 
         for quick_sig, group_files in quick_groups.items():
-            if len(group_files) == 1:
-                path_str, current_hash = group_files[0]
-                unique_marker = f"{HEAD_UNIQUE_PREFIX}:{file_size}:{quick_sig}"
-                if current_hash != unique_marker:
-                    cursor.execute("UPDATE files SET hash=? WHERE path=?", (unique_marker, path_str))
+            pending_paths = []
+            for path_str in group_files:
+                cursor.execute("SELECT hash, hash_error FROM files WHERE path=?", (path_str,))
+                row = cursor.fetchone()
+                if row and row[0] is None and row[1] == 0:
+                    pending_paths.append(path_str)
 
-                if current_hash is None or current_hash == '' or current_hash.startswith(f"{HEAD_UNIQUE_PREFIX}:"):
+            if not pending_paths:
+                continue
+
+            if len(group_files) == 1:
+                for path_str in pending_paths:
                     processed_candidates += 1
                     fname = os.path.basename(path_str)
                     if len(fname) > 20:
@@ -336,10 +337,8 @@ def _phase_calculate_hashes(conn, cursor):
                     print_progress(processed_candidates, total_candidates, prefix='Hashing:', suffix=f'{fname}', length=30)
                 continue
 
-            for path_str, current_hash in group_files:
-                if current_hash is None or current_hash == '' or current_hash.startswith(f"{HEAD_UNIQUE_PREFIX}:"):
-                    processed_candidates += 1
-
+            for path_str in pending_paths:
+                processed_candidates += 1
                 fname = os.path.basename(path_str)
                 if len(fname) > 20:
                     fname = fname[:17] + "..."
@@ -347,18 +346,22 @@ def _phase_calculate_hashes(conn, cursor):
 
                 full_hash = calcular_hash_completo(path_str)
                 if full_hash is None:
-                    full_hash = _build_hash_error_marker(path_str)
+                    cursor.execute("UPDATE files SET hash=NULL, hash_error=1 WHERE path=?", (path_str,))
                 else:
                     hashes_calculated += 1
-
-                if current_hash != full_hash:
-                    cursor.execute("UPDATE files SET hash=? WHERE path=?", (full_hash, path_str))
+                    cursor.execute("UPDATE files SET hash=?, hash_error=0 WHERE path=?", (full_hash, path_str))
 
         conn.commit()
 
     print_progress(total_candidates, total_candidates, prefix='Hashing:', suffix='Completado', length=30)
     print()
     print(f"   -> Hashes completos calculados: {hashes_calculated}")
+
+
+def _hash_tag_for_filename(file_hash):
+    if isinstance(file_hash, (bytes, bytearray, memoryview)):
+        return bytes(file_hash).hex()[:8]
+    return str(file_hash)[:8]
 
 
 def _sort_duplicate_candidates(candidates, script_path):
@@ -392,7 +395,8 @@ def _move_or_delete_duplicate(mover_a, borrar_realmente, file_hash, archivo_dele
         if dest_f.exists():
             base = dest_f.stem
             ext = dest_f.suffix
-            dest_f = destino / f"{base}_COPY_{file_hash[:8]}{ext}"
+            hash_tag = _hash_tag_for_filename(file_hash)
+            dest_f = destino / f"{base}_COPY_{hash_tag}{ext}"
 
         shutil.move(str(archivo_delete), str(dest_f))
         print(f"  Acción:    MOVIDO a {dest_f} ✅")
@@ -419,11 +423,9 @@ def _move_or_delete_duplicate(mover_a, borrar_realmente, file_hash, archivo_dele
 def _phase_deduplicate(conn, cursor, mover_a, borrar_realmente, script_path):
     print(">> FASE 4: Analizando duplicados...")
     cursor.execute(
-        f"SELECT hash, count(*) as cnt FROM files "
+        "SELECT hash, count(*) as cnt FROM files "
         "WHERE hash IS NOT NULL "
-        "AND hash <> '' "
-        f"AND hash NOT LIKE '{HASH_ERROR_PREFIX}:%' "
-        f"AND hash NOT LIKE '{HEAD_UNIQUE_PREFIX}:%' "
+        "AND hash_error = 0 "
         "GROUP BY hash HAVING cnt > 1"
     )
     duplicate_blocks = cursor.fetchall()
