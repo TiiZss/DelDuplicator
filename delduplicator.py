@@ -22,6 +22,8 @@ except ImportError:
 # --- CONFIGURACIÓN DB ---
 DEFAULT_DB_NAME = "delduplicator.db"
 QUICK_SAMPLE_BYTES = 4096
+INT64_MASK = (1 << 64) - 1
+INT64_SIGN_BIT = 1 << 63
 
 # --- LISTA NEGRA DE DIRECTORIOS (Seguridad) ---
 SYSTEM_DIRS = {
@@ -42,7 +44,7 @@ def init_db(db_path):
             path TEXT PRIMARY KEY,
             size INTEGER,
             mtime REAL,
-            hash BLOB,
+            hash INTEGER,
             hash_error INTEGER DEFAULT 0,
             last_seen REAL
         )
@@ -53,8 +55,8 @@ def init_db(db_path):
     if "hash_error" not in cols:
         c.execute("ALTER TABLE files ADD COLUMN hash_error INTEGER DEFAULT 0")
 
-    # Si hay hashes en texto de versiones previas, forzamos recálculo binario.
-    c.execute("UPDATE files SET hash = NULL, hash_error = 0 WHERE typeof(hash) = 'text'")
+    # Si hay hashes legados (texto/blob), forzamos recálculo en formato int64.
+    c.execute("UPDATE files SET hash = NULL, hash_error = 0 WHERE hash IS NOT NULL AND typeof(hash) != 'integer'")
 
     # Índices para acelerar búsquedas
     c.execute('CREATE INDEX IF NOT EXISTS idx_size ON files (size)')
@@ -64,7 +66,7 @@ def init_db(db_path):
 
 def calcular_hash_sha256(ruta_archivo):
     """
-    Calcula SHA-256 (Más seguro que MD5/SHA1).
+    Calcula un fallback int64 derivado de SHA-256.
     """
     sha256 = hashlib.sha256()
     bloque_size = 65536 
@@ -76,9 +78,18 @@ def calcular_hash_sha256(ruta_archivo):
                 if not bloque:
                     break
                 sha256.update(bloque)
-        return sha256.digest()
+        digest8 = sha256.digest()[:8]
+        return _to_sqlite_int64(int.from_bytes(digest8, byteorder="big", signed=False))
     except OSError:
         return None
+
+
+def _to_sqlite_int64(value):
+    """Normaliza a entero con signo de 64 bits compatible con SQLite."""
+    normalized = value & INT64_MASK
+    if normalized >= INT64_SIGN_BIT:
+        normalized -= (1 << 64)
+    return normalized
 
 
 def calcular_firma_rapida(ruta_archivo):
@@ -92,18 +103,20 @@ def calcular_firma_rapida(ruta_archivo):
         return None
 
     if xxhash is not None:
-        return xxhash.xxh3_128_digest(head)
-    return hashlib.blake2b(head, digest_size=16).digest()
+        return _to_sqlite_int64(xxhash.xxh3_64_intdigest(head))
+
+    fallback = hashlib.blake2b(head, digest_size=8).digest()
+    return _to_sqlite_int64(int.from_bytes(fallback, byteorder="big", signed=False))
 
 
 def calcular_hash_completo(ruta_archivo):
     """
-    Hash completo en binario: XXH3-128 si está disponible, fallback SHA-256.
+    Hash completo int64: XXH3-64 si está disponible, fallback derivado de SHA-256.
     """
     if xxhash is None:
         return calcular_hash_sha256(ruta_archivo)
 
-    h = xxhash.xxh3_128()
+    h = xxhash.xxh3_64()
     bloque_size = 65536
     try:
         with open(ruta_archivo, "rb") as f:
@@ -114,7 +127,7 @@ def calcular_hash_completo(ruta_archivo):
                 h.update(bloque)
     except OSError:
         return None
-    return h.digest()
+    return _to_sqlite_int64(h.intdigest())
 
 def limpiar_log_obsoleto(log_path):
     """
@@ -234,12 +247,33 @@ def _phase_index_files(conn, cursor, ruta_base, script_path, db_path, path_mover
     print(">> FASE 1: Indexando archivos (Actualizando DB)...")
     scan_time = time.time()
     count_scanned = 0
-    batch_size = 1000
+    batch_size = 5000
 
     sql_select = "SELECT size, mtime, hash FROM files WHERE path = ?"
     sql_insert = "INSERT INTO files (path, size, mtime, hash, hash_error, last_seen) VALUES (?, ?, ?, ?, ?, ?)"
     sql_update = "UPDATE files SET size=?, mtime=?, hash=?, hash_error=?, last_seen=? WHERE path=?"
     sql_touch = "UPDATE files SET last_seen=? WHERE path=?"
+
+    pending_insert = []
+    pending_update = []
+    pending_touch = []
+
+    def flush_batches():
+        if not (pending_insert or pending_update or pending_touch):
+            return
+
+        cursor.execute("BEGIN TRANSACTION")
+        if pending_insert:
+            cursor.executemany(sql_insert, pending_insert)
+        if pending_update:
+            cursor.executemany(sql_update, pending_update)
+        if pending_touch:
+            cursor.executemany(sql_touch, pending_touch)
+        conn.commit()
+
+        pending_insert.clear()
+        pending_update.clear()
+        pending_touch.clear()
 
     for resolved_path, stat in _iter_eligible_files(
         ruta_base,
@@ -258,18 +292,18 @@ def _phase_index_files(conn, cursor, ruta_base, script_path, db_path, path_mover
         if row:
             db_size, db_mtime, _ = row
             if size != db_size or abs(mtime - db_mtime) > 0.001:
-                cursor.execute(sql_update, (size, mtime, None, 0, scan_time, path_str))
+                pending_update.append((size, mtime, None, 0, scan_time, path_str))
             else:
-                cursor.execute(sql_touch, (scan_time, path_str))
+                pending_touch.append((scan_time, path_str))
         else:
-            cursor.execute(sql_insert, (path_str, size, mtime, None, 0, scan_time))
+            pending_insert.append((path_str, size, mtime, None, 0, scan_time))
 
         count_scanned += 1
         if count_scanned % batch_size == 0:
-            conn.commit()
+            flush_batches()
             print(f"   ... procesados {count_scanned} archivos", end='\r')
 
-    conn.commit()
+    flush_batches()
     print(f"   -> Total escaneados: {count_scanned}")
     return scan_time
 
@@ -359,8 +393,10 @@ def _phase_calculate_hashes(conn, cursor):
 
 
 def _hash_tag_for_filename(file_hash):
-    if isinstance(file_hash, (bytes, bytearray, memoryview)):
-        return bytes(file_hash).hex()[:8]
+    if isinstance(file_hash, int):
+        # Muestra estable en hex aunque internamente esté en entero firmado.
+        unsigned = file_hash & INT64_MASK
+        return f"{unsigned:016x}"[:8]
     return str(file_hash)[:8]
 
 
