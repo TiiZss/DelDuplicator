@@ -1,0 +1,49 @@
+# Release Draft v3.1.0
+
+## Summary
+This release strengthens runtime stability, security posture, and maintainability for DelDuplicator while preserving the existing CLI and GUI behavior.
+
+## Highlights
+- Fixed CLI startup/runtime blockers in `delduplicator.py`.
+- Activated real extension filtering for `--include` and `--exclude`.
+- Reduced code quality debt by refactoring deduplication flow into phase helpers.
+- Hardened GUI progress parsing regex to avoid pathological backtracking warnings.
+- Audited subprocess usage in GUI and documented nosec rationale where appropriate.
+- Added operational governance docs in repository root:
+  - `CLAUDE.md`
+  - `MEMORY.md`
+  - `LEARNINGS.md`
+  - `decisions.md`
+  - `KANBAN.md`
+  - `ARCHITECTURE.md`
+  - `TROUBLESHOOTING.md`
+
+## Fixed
+- `NameError` due to missing imports (`argparse`, `re`) in `delduplicator.py`.
+- SQL execution warning source (f-string query) replaced with plain query string.
+- Generic `except` narrowed in restore log write path.
+- Include/exclude options now applied during scan filtering.
+
+## Validation Evidence
+- CLI smoke test:
+  - `python .\delduplicator.py --help` -> OK
+- Functional test:
+  - Created duplicate files in `.tmp_test_dd` and ran move mode -> duplicate moved, source retained, restore log generated.
+- Security audit:
+  - `uvx --from bandit bandit -r . -x .git,node_modules,.tmp_test_dd,dest,graft` -> No issues identified.
+- Problems panel status:
+  - No errors in touched files at end of implementation.
+
+## Compatibility
+- No breaking CLI argument changes.
+- Existing workflows remain valid.
+
+## Known Notes
+- Humanizer post-processing is pending tool availability in this environment.
+- Tag creation and GitHub release publication are pending maintainer approval.
+
+## Suggested Tag
+- `v3.1.0`
+
+## Suggested Release Title
+- `v3.1.0 - Runtime Stability, Security Hardening, and Governance Baseline`

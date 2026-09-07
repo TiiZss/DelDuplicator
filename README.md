@@ -61,6 +61,20 @@ python delduplicator.py . --borrar
 
 Consulta el [CHANGELOG.md](CHANGELOG.md) para ver el historial de cambios.
 
+## 🧭 Documentación Operativa
+
+Este repositorio incluye un mapa operativo y metadatos de trabajo para agentes:
+
+* `CLAUDE.md`: mapa operativo del proyecto (equivalente para uso en este entorno).
+* `MEMORY.md`: contexto duradero del proyecto.
+* `LEARNINGS.md`: lecciones aprendidas verificadas.
+* `decisions.md`: registro auditable de decisiones.
+* `KANBAN.md`: estado de trabajo por columnas.
+* `ARCHITECTURE.md`: visión de componentes y principios.
+* `TROUBLESHOOTING.md`: incidencias frecuentes y resolución.
+
+Recomendación para ejecución Python con dependencias: priorizar `uv run` sobre llamadas directas a `python`.
+
 ## 📄 Licencia
 
 Este proyecto está bajo la Licencia MIT - mira el archivo [LICENSE](LICENSE) para detalles.

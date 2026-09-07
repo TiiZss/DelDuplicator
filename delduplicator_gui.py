@@ -4,7 +4,8 @@
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
-import subprocess
+# Uso intencional para ejecutar scripts locales controlados.
+import subprocess  # nosec B404
 import threading
 import sys
 import os
@@ -195,9 +196,9 @@ class DelDuplicatorGUI:
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, 
                 text=True, bufsize=1, encoding='utf-8', errors='replace',
                 cwd=os.path.dirname(os.path.abspath(__file__))
-            )
+            )  # nosec B603
             
-            regex_progress = re.compile(r"\|.*\| (\d+\.?\d*)%")
+            regex_progress = re.compile(r"\|[^|]*\|\s+(\d+(?:\.\d+)?)%")
             
             for line in self.current_process.stdout:
                 line_clean = line.strip()

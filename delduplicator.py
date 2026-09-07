@@ -5,6 +5,8 @@
 import os
 import hashlib
 import sys
+import argparse
+import re
 import shutil
 import datetime
 import sqlite3
@@ -108,6 +110,259 @@ def print_progress(iteration, total, prefix='', suffix='', decimals=1, length=50
     if iteration == total: 
         print()
 
+
+def _normalize_ext(ext):
+    ext = ext.strip().lower()
+    if not ext:
+        return None
+    return ext if ext.startswith('.') else f'.{ext}'
+
+
+def _build_extension_filters(includes, excludes):
+    include_exts = {_normalize_ext(ext) for ext in includes} if includes else None
+    exclude_exts = {_normalize_ext(ext) for ext in excludes} if excludes else None
+    if include_exts:
+        include_exts.discard(None)
+    if exclude_exts:
+        exclude_exts.discard(None)
+    return include_exts, exclude_exts
+
+
+def _is_indexable_regular_file(archivo_actual):
+    return archivo_actual.is_file() and not archivo_actual.is_symlink()
+
+
+def _is_protected_path(resolved_path, script_path, db_resolved, path_mover_abs):
+    if resolved_path == script_path:
+        return True
+    if resolved_path == db_resolved:
+        return True
+    if path_mover_abs and path_mover_abs in resolved_path.parents:
+        return True
+    parts = resolved_path.parts
+    return any(p in SYSTEM_DIRS or p in IGNORED_DIRS for p in parts)
+
+
+def _passes_file_property_filters(archivo_actual, stat, include_exts, exclude_exts):
+    if stat.st_size == 0:
+        return False
+    if hasattr(stat, 'st_nlink') and stat.st_nlink > 1:
+        return False
+
+    file_ext = archivo_actual.suffix.lower()
+    if include_exts is not None and file_ext not in include_exts:
+        return False
+    if exclude_exts is not None and file_ext in exclude_exts:
+        return False
+    return True
+
+
+def _iter_eligible_files(ruta_base, script_path, db_path, path_mover_abs, include_exts, exclude_exts):
+    db_resolved = Path(db_path).resolve()
+    for archivo_actual in ruta_base.rglob("*"):
+        if not _is_indexable_regular_file(archivo_actual):
+            continue
+
+        resolved_path = archivo_actual.resolve()
+        if _is_protected_path(resolved_path, script_path, db_resolved, path_mover_abs):
+            continue
+
+        try:
+            stat = archivo_actual.stat()
+        except OSError:
+            continue
+
+        if not _passes_file_property_filters(archivo_actual, stat, include_exts, exclude_exts):
+            continue
+
+        yield resolved_path, stat
+
+
+def _phase_index_files(conn, cursor, ruta_base, script_path, db_path, path_mover_abs, include_exts, exclude_exts):
+    print(">> FASE 1: Indexando archivos (Actualizando DB)...")
+    scan_time = time.time()
+    count_scanned = 0
+    batch_size = 1000
+
+    sql_select = "SELECT size, mtime, hash FROM files WHERE path = ?"
+    sql_insert = "INSERT INTO files (path, size, mtime, hash, last_seen) VALUES (?, ?, ?, ?, ?)"
+    sql_update = "UPDATE files SET size=?, mtime=?, hash=?, last_seen=? WHERE path=?"
+    sql_touch = "UPDATE files SET last_seen=? WHERE path=?"
+
+    for resolved_path, stat in _iter_eligible_files(
+        ruta_base,
+        script_path,
+        db_path,
+        path_mover_abs,
+        include_exts,
+        exclude_exts,
+    ):
+        size = stat.st_size
+        mtime = stat.st_mtime
+        path_str = str(resolved_path)
+
+        cursor.execute(sql_select, (path_str,))
+        row = cursor.fetchone()
+        if row:
+            db_size, db_mtime, _ = row
+            if size != db_size or abs(mtime - db_mtime) > 0.001:
+                cursor.execute(sql_update, (size, mtime, None, scan_time, path_str))
+            else:
+                cursor.execute(sql_touch, (scan_time, path_str))
+        else:
+            cursor.execute(sql_insert, (path_str, size, mtime, None, scan_time))
+
+        count_scanned += 1
+        if count_scanned % batch_size == 0:
+            conn.commit()
+            print(f"   ... procesados {count_scanned} archivos", end='\r')
+
+    conn.commit()
+    print(f"   -> Total escaneados: {count_scanned}")
+    return scan_time
+
+
+def _phase_prune_db(conn, cursor, scan_time):
+    print(">> FASE 2: Limpiando entradas obsoletas...")
+    cursor.execute("DELETE FROM files WHERE last_seen < ?", (scan_time,))
+    deleted_count = cursor.rowcount
+    conn.commit()
+    print(f"   -> Eliminados {deleted_count} registros de archivos que ya no existen.")
+
+
+def _phase_calculate_hashes(conn, cursor):
+    print(">> FASE 3: Calculando hashes (solo colisiones de tamaño)...")
+    cursor.execute(
+        "SELECT count(*) FROM files WHERE hash IS NULL AND size IN (SELECT size FROM files GROUP BY size HAVING count(*) > 1)"
+    )
+    row_count = cursor.fetchone()
+    total_to_hash = row_count[0] if row_count else 0
+
+    hashes_calculated = 0
+    if total_to_hash <= 0:
+        print(f"   -> Hashes nuevos calculados: {hashes_calculated}")
+        return
+
+    print(f"   -> Necesario calcular hash de {total_to_hash} archivos candidatos...")
+    while True:
+        cursor.execute(
+            "SELECT path FROM files WHERE hash IS NULL AND size IN (SELECT size FROM files GROUP BY size HAVING count(*) > 1) LIMIT 100"
+        )
+        batch = cursor.fetchall()
+        if not batch:
+            break
+
+        for (path_str,) in batch:
+            fname = os.path.basename(path_str)
+            if len(fname) > 20:
+                fname = fname[:17] + "..."
+            print_progress(hashes_calculated, total_to_hash, prefix='Hashing:', suffix=f'{fname}', length=30)
+
+            sha256_val = calcular_hash_sha256(path_str)
+            if sha256_val:
+                cursor.execute("UPDATE files SET hash=? WHERE path=?", (sha256_val, path_str))
+
+            hashes_calculated += 1
+
+        conn.commit()
+
+    print_progress(total_to_hash, total_to_hash, prefix='Hashing:', suffix='Completado', length=30)
+    print()
+    print(f"   -> Hashes nuevos calculados: {hashes_calculated}")
+
+
+def _sort_duplicate_candidates(candidates, script_path):
+    match_copy_regex = re.compile(r' \(\d+\)$')
+
+    def sort_key(item, script_abs=script_path, copy_regex=match_copy_regex):
+        p = item['path']
+        is_script = p.resolve() == script_abs
+        has_copy_pattern = bool(copy_regex.search(p.stem))
+        mtime = item['mtime']
+        prio_script = 0 if is_script else 1
+        prio_pattern = 1 if has_copy_pattern else 0
+        return (prio_script, prio_pattern, mtime)
+
+    candidates.sort(key=sort_key)
+
+
+def _move_or_delete_duplicate(mover_a, borrar_realmente, file_hash, archivo_delete):
+    if mover_a:
+        destino = Path(mover_a).resolve()
+        destino.mkdir(parents=True, exist_ok=True)
+        dest_f = destino / archivo_delete.name
+        if dest_f.exists():
+            base = dest_f.stem
+            ext = dest_f.suffix
+            dest_f = destino / f"{base}_COPY_{file_hash[:8]}{ext}"
+
+        shutil.move(str(archivo_delete), str(dest_f))
+        print(f"  Acción:    MOVIDO a {dest_f} ✅")
+
+        log_file = destino / "restore_log.txt"
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            with open(log_file, "a", encoding="utf-8") as f:
+                f.write(f"{timestamp} | {archivo_delete} | {dest_f}\n")
+        except OSError:
+            # Si el log falla no detenemos el flujo principal de deduplicacion.
+            pass
+        return True
+
+    if borrar_realmente:
+        os.remove(archivo_delete)
+        print("  Acción:    ELIMINADO ✅")
+        return True
+
+    print("  Acción:    Se procesaría (Simulación) ⚠️")
+    return False
+
+
+def _phase_deduplicate(conn, cursor, mover_a, borrar_realmente, script_path):
+    print(">> FASE 4: Analizando duplicados...")
+    cursor.execute("SELECT hash, count(*) as cnt FROM files WHERE hash IS NOT NULL GROUP BY hash HAVING cnt > 1")
+    duplicate_blocks = cursor.fetchall()
+
+    contador_duplicados = 0
+    espacio_liberado = 0
+
+    for (file_hash, _) in duplicate_blocks:
+        cursor.execute("SELECT path, mtime, size FROM files WHERE hash = ?", (file_hash,))
+        candidates = [
+            {'path': Path(p_str), 'mtime': m_time, 'size': f_size}
+            for (p_str, m_time, f_size) in cursor.fetchall()
+        ]
+
+        _sort_duplicate_candidates(candidates, script_path)
+        keeper = candidates[0]
+        to_delete = candidates[1:]
+
+        print(f"[GRUPO DUPLICADO (x{len(candidates)})]")
+        print(f"  Conservar: {keeper['path'].name}")
+
+        for item in to_delete:
+            archivo_delete = item['path']
+            print(f"  Procesar:  {archivo_delete.name}")
+
+            accion_exitosa = False
+            try:
+                accion_exitosa = _move_or_delete_duplicate(mover_a, borrar_realmente, file_hash, archivo_delete)
+            except Exception as e:
+                if mover_a:
+                    print(f"  Acción:    ERROR AL MOVER ({e}) ❌")
+                elif borrar_realmente:
+                    print(f"  Acción:    ERROR BORRADO ({e}) ❌")
+
+            if accion_exitosa:
+                cursor.execute("DELETE FROM files WHERE path=?", (str(archivo_delete),))
+                contador_duplicados += 1
+                espacio_liberado += item['size']
+
+        print("-" * 40)
+        conn.commit()
+
+    return contador_duplicados, espacio_liberado
+
 def escanear_y_eliminar(directorio, borrar_realmente, mover_a=None, includes=None, excludes=None, db_file=None):
     ruta_base = Path(directorio).resolve()
     if not ruta_base.exists():
@@ -128,13 +383,9 @@ def escanear_y_eliminar(directorio, borrar_realmente, mover_a=None, includes=Non
     print(f"--- {modo_txt} ---")
     print(f"--- Escaneando: {ruta_base} ---\n")
     
-    # Preparar ruta destino segura para evitar bucles (Si movemos a D:\Backup dentro de D:\)
     path_mover_abs = Path(mover_a).resolve() if mover_a else None
-    
-    # Filtros
-    inc_exts = set(ext.lower() for ext in includes) if includes else None
-    exc_exts = set(ext.lower() for ext in excludes) if excludes else None
-    
+    include_exts, exclude_exts = _build_extension_filters(includes, excludes)
+
     conn = init_db(db_path)
     cursor = conn.cursor()
     
@@ -142,263 +393,26 @@ def escanear_y_eliminar(directorio, borrar_realmente, mover_a=None, includes=Non
     espacio_liberado = 0
     
     try:
-        # --- FASE 1: INDEXACIÓN ---
-        print(">> FASE 1: Indexando archivos (Actualizando DB)...")
         script_path = Path(__file__).resolve()
-        scan_time = time.time()
-        count_scanned = 0
-        BATCH_SIZE = 1000
-        
-        # Preparamos queries
-        sql_select = "SELECT size, mtime, hash FROM files WHERE path = ?"
-        sql_insert = "INSERT INTO files (path, size, mtime, hash, last_seen) VALUES (?, ?, ?, ?, ?)"
-        sql_update = "UPDATE files SET size=?, mtime=?, hash=?, last_seen=? WHERE path=?"
-        sql_touch  = "UPDATE files SET last_seen=? WHERE path=?"
-
-        for archivo_actual in ruta_base.rglob("*"):
-            if not archivo_actual.is_file() or archivo_actual.is_symlink():
-                continue
-            
-            # --- PROTECCIONES DE SEGURIDAD ---
-            
-            # 1. Protección propia y DB
-            resolved_path = archivo_actual.resolve()
-            if resolved_path == script_path: continue
-            if str(resolved_path) == str(Path(db_path).resolve()): continue
-            
-            # 2. Ignorar carpeta destino de movimientos (Evitar Loop Infinito)
-            if path_mover_abs and path_mover_abs in resolved_path.parents:
-                continue
-
-            # 3. Ignorar carpetas de sistema/ocultas
-            parts = resolved_path.parts
-            if any(p in SYSTEM_DIRS or p in IGNORED_DIRS for p in parts):
-                continue
-                
-            # 4. Ignorar archivos de 0 bytes (Ruido)
-            try:
-                stat = archivo_actual.stat()
-                if stat.st_size == 0:
-                    continue
-                
-                # 5. Detección de Hardlinks (st_nlink > 1)
-                # Si tiene más de 1 link, es el mismo fichero físico. No tocar.
-                if hasattr(stat, 'st_nlink') and stat.st_nlink > 1:
-                    continue
-                    
-                size = stat.st_size
-                mtime = stat.st_mtime
-                path_str = str(resolved_path)
-                
-                # ... (resto de indexación)
-                
-                # Check DB
-                cursor.execute(sql_select, (path_str,))
-                row = cursor.fetchone()
-                
-                if row:
-                    # Existe. Verificar mtime/size
-                    db_size, db_mtime, db_hash = row
-                    if size != db_size or abs(mtime - db_mtime) > 0.001:
-                        # Ha cambiado: Invalida hash
-                        cursor.execute(sql_update, (size, mtime, None, scan_time, path_str))
-                    else:
-                        # No ha cambiado: Solo actualiza last_seen
-                        cursor.execute(sql_touch, (scan_time, path_str))
-                else:
-                    # Nuevo
-                    cursor.execute(sql_insert, (path_str, size, mtime, None, scan_time))
-                
-                count_scanned += 1
-                if count_scanned % BATCH_SIZE == 0:
-                    conn.commit()
-                    print(f"   ... procesados {count_scanned} archivos", end='\r')
-                    
-            except OSError:
-                continue
-
-        conn.commit()
-        print(f"   -> Total escaneados: {count_scanned}")
-        
-        # --- FASE 2: LIMPIEZA (PRUNE) ---
-        print(">> FASE 2: Limpiando entradas obsoletas...")
-        cursor.execute("DELETE FROM files WHERE last_seen < ?", (scan_time,))
-        deleted_count = cursor.rowcount
-        conn.commit()
-        print(f"   -> Eliminados {deleted_count} registros de archivos que ya no existen.")
-
-        # --- FASE 3: CALCULO DE HASH (LAZY) ---
-        print(">> FASE 3: Calculando hashes (solo colisiones de tamaño)...")
-        # Buscar tamaños repetidos
-        cursor.execute("SELECT count(*) FROM files WHERE hash IS NULL AND size IN (SELECT size FROM files GROUP BY size HAVING count(*) > 1)")
-        row_count = cursor.fetchone()
-        total_to_hash = row_count[0] if row_count else 0
-        
-        hashes_calculated = 0
-        if total_to_hash > 0:
-            print(f"   -> Necesario calcular hash de {total_to_hash} archivos candidatos...")
-            
-            # Iterar usando cursor server-side
-            # SQLite puede bloquearse si leemos y escribimos al mismo tiempo con distintos cursores/conexiones
-            # Solución: Leer por lotes en memoria (lista), cerrar cursor de lectura y procesar.
-            
-            offset = 0
-            while True:
-                # Leemos un lote de candidatos a procesar
-                # Necesitamos nueva query cada vez porque estamos modificando la tabla (rellenando hash)
-                # O usamos LIMIT/OFFSET
-                cursor.execute(f"SELECT path FROM files WHERE hash IS NULL AND size IN (SELECT size FROM files GROUP BY size HAVING count(*) > 1) LIMIT 100")
-                batch = cursor.fetchall()
-                
-                if not batch:
-                    break
-                    
-                for path_tuple in batch:
-                    path_str = path_tuple[0]
-                    # GUI
-                    fname = os.path.basename(path_str)
-                    if len(fname) > 20: fname = fname[:17] + "..."
-                    print_progress(hashes_calculated, total_to_hash, prefix='Hashing:', suffix=f'{fname}', length=30)
-                    
-                    # Usamos SHA256 ahora
-                    sha256_val = calcular_hash_sha256(path_str)
-                    if sha256_val:
-                        final_hash = sha256_val
-                        cursor.execute("UPDATE files SET hash=? WHERE path=?", (final_hash, path_str))
-                    
-                    hashes_calculated += 1
-                
-                # Commit por lote
-                conn.commit()
-            
-            print_progress(total_to_hash, total_to_hash, prefix='Hashing:', suffix='Completado', length=30)
-            print() # Salto final
-
-            
-        print(f"   -> Hashes nuevos calculados: {hashes_calculated}")
-
-        # --- FASE 4: DEDUPLICACIÓN ---
-        print(">> FASE 4: Analizando duplicados...")
-        
-        cursor.execute("SELECT hash, count(*) as cnt FROM files WHERE hash IS NOT NULL GROUP BY hash HAVING cnt > 1")
-        duplicate_blocks = cursor.fetchall()
-        
-        # contador_duplicados = 0 # Ya inicializado arriba
-        # espacio_liberado = 0
-        
-        for (file_hash, count) in duplicate_blocks:
-            cursor.execute("SELECT path, mtime, size FROM files WHERE hash = ?", (file_hash,))
-            candidates = []
-            for row in cursor.fetchall():
-                p_str, m_time, f_size = row
-                candidates.append({
-                    'path': Path(p_str),
-                    'mtime': m_time,
-                    'size': f_size
-                })
-            
-            # Ordenar candidatos para decidir cual borrar
-            # Queremos encontrar el "MEJOR" para conservar y borrar el resto
-            # En nuestro loop original, comparabamos parejas. Aquí tenemos N archivos.
-            # Convertimos a la lógica de "Elegir 1 KEEP, borrar N-1"
-            
-            match_copy_regex = re.compile(r' \(\d+\)$')
-            
-            # Estrategia: Buscar el "Mejor Candidato" para KEEP
-            # Criterios para NO ser elegido (penalización):
-            # 1. Tiene patrón " (1)" -> penalizado
-            # 2. Es más nuevo -> penalizado
-            
-            # Ordenamos: 
-            #  Prioridad 1: Que sea el script propio (seguridad extrema, aunque ya filtramos arriba)
-            #  Prioridad 2: NO tiene patrón de copia (False < True)
-            #  Prioridad 3: Más antiguo (menor mtime)
-            
-            # Nota sobre sort: Python sort es estable.
-            # Queremos que el index 0 sea el que SE QUEDA.
-            
-            script_abs = script_path
-            
-            def sort_key(item):
-                p = item['path']
-                is_script = (p.resolve() == script_abs)
-                has_copy_pattern = bool(match_copy_regex.search(p.stem))
-                mtime = item['mtime']
-                 
-                # Tuple comparison:
-                # 1. Is script? (True should come first -> invert boolean for sort?) 
-                # We want "Best to Keep" at index 0.
-                # Script: Priority #1. If is_script, key should be minimal. -> 0 else 1
-                prio_script = 0 if is_script else 1
-                
-                # Pattern: Prefer clean (False) over copy (True). False=0, True=1.
-                prio_pattern = 1 if has_copy_pattern else 0
-                
-                # Date: Prefer older (smaller mtime).
-                return (prio_script, prio_pattern, mtime)
-            
-            candidates.sort(key=sort_key)
-            
-            keeper = candidates[0]
-            to_delete = candidates[1:]
-            
-            print(f"[GRUPO DUPLICADO (x{len(candidates)})]")
-            print(f"  Conservar: {keeper['path'].name}")
-            
-            for item in to_delete:
-                archivo_delete = item['path']
-                print(f"  Procesar:  {archivo_delete.name}")
-                
-                accion_exitosa = False
-                
-                # --- BORRAR DB ---
-                # Si lo borramos del disco, lo quitamos de la DB para que no salga en next run
-                # Si fallamos, lo dejamos.
-                
-                if mover_a:
-                    try:
-                        destino = Path(mover_a).resolve()
-                        destino.mkdir(parents=True, exist_ok=True)
-                        dest_f = destino / archivo_delete.name
-                        
-                        if dest_f.exists():
-                             base = dest_f.stem
-                             ext = dest_f.suffix
-                             dest_f = destino / f"{base}_COPY_{file_hash[:8]}{ext}"
-                        
-                        shutil.move(str(archivo_delete), str(dest_f))
-                        print(f"  Acción:    MOVIDO a {dest_f} ✅")
-                        
-                        # Log
-                        log_file = destino / "restore_log.txt"
-                        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        try:
-                            with open(log_file, "a", encoding="utf-8") as f:
-                                f.write(f"{timestamp} | {archivo_delete} | {dest_f}\n")
-                        except: pass
-                            
-                        accion_exitosa = True
-                    except Exception as e:
-                        print(f"  Acción:    ERROR AL MOVER ({e}) ❌")
-                        
-                elif borrar_realmente:
-                    try:
-                        os.remove(archivo_delete)
-                        print("  Acción:    ELIMINADO ✅")
-                        accion_exitosa = True
-                    except OSError as e:
-                        print(f"  Acción:    ERROR BORRADO ({e}) ❌")
-                else:
-                    print("  Acción:    Se procesaría (Simulación) ⚠️")
-                
-                if accion_exitosa:
-                    # Eliminar de la DB
-                    cursor.execute("DELETE FROM files WHERE path=?", (str(archivo_delete),))
-                    contador_duplicados += 1
-                    espacio_liberado += item['size']
-                
-            print("-" * 40)
-            conn.commit() # Commit tras cada grupo procesado
+        scan_time = _phase_index_files(
+            conn,
+            cursor,
+            ruta_base,
+            script_path,
+            db_path,
+            path_mover_abs,
+            include_exts,
+            exclude_exts,
+        )
+        _phase_prune_db(conn, cursor, scan_time)
+        _phase_calculate_hashes(conn, cursor)
+        contador_duplicados, espacio_liberado = _phase_deduplicate(
+            conn,
+            cursor,
+            mover_a,
+            borrar_realmente,
+            script_path,
+        )
 
     except KeyboardInterrupt:
         print("\n\n!!! Interrumpido por usuario. Cerrando DB segura...")
