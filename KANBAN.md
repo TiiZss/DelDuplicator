@@ -53,7 +53,7 @@ Evidencias:
 - Branch: feature/workflow-governance-baseline
 - Objetivo: establecer marco operativo del repo para ejecucion con calidad y trazabilidad.
 - Responsable: Copilot + mantenimiento del repositorio.
-- Estado: In Progress
+- Estado: Done
 - Fecha inicio: 2026-09-07
 - Fecha objetivo: 2026-09-07
 
@@ -72,7 +72,7 @@ Checklist de ejecucion:
 Evidencias:
 
 - PR: pendiente
-- Commit(s): pendiente
+- Commit(s): c57183d
 - Resultado tests: smoke test CLI OK (`--help`) + prueba funcional mover duplicado en `.tmp_test_dd` OK.
 - Resultado auditoria seguridad: Bandit ejecutado con `uvx`; sin hallazgos (0 low/medium/high).
 - Problems pendientes: ninguno en archivos tocados de esta feature.
@@ -83,7 +83,7 @@ Evidencias:
 
 ## In Progress
 
-- workflow-governance-baseline (feature/workflow-governance-baseline)
+- Ninguna tarea en progreso.
 
 ## Review
 
@@ -94,3 +94,4 @@ Evidencias:
 - Creado mapa operativo en CLAUDE.md.
 - Creados metadatos de flujo: MEMORY.md, LEARNINGS.md, decisions.md.
 - Definido checklist pre-release dentro de KANBAN.md.
+- Feature workflow-governance-baseline implementada y commiteada en c57183d.
