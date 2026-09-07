@@ -24,6 +24,8 @@ DEFAULT_DB_NAME = "delduplicator.db"
 QUICK_SAMPLE_BYTES = 4096
 INT64_MASK = (1 << 64) - 1
 INT64_SIGN_BIT = 1 << 63
+HASH_PROGRESS_PREFIX = "Hashing:"
+FILE_COMPARE_CHUNK_SIZE = 65536
 
 # --- LISTA NEGRA DE DIRECTORIOS (Seguridad) ---
 SYSTEM_DIRS = {
@@ -69,7 +71,7 @@ def calcular_hash_sha256(ruta_archivo):
     Calcula un fallback int64 derivado de SHA-256.
     """
     sha256 = hashlib.sha256()
-    bloque_size = 65536 
+    bloque_size = FILE_COMPARE_CHUNK_SIZE 
     
     try:
         with open(ruta_archivo, "rb") as f:
@@ -117,7 +119,7 @@ def calcular_hash_completo(ruta_archivo):
         return calcular_hash_sha256(ruta_archivo)
 
     h = xxhash.xxh3_64()
-    bloque_size = 65536
+    bloque_size = FILE_COMPARE_CHUNK_SIZE
     try:
         with open(ruta_archivo, "rb") as f:
             while True:
@@ -368,7 +370,7 @@ def _phase_calculate_hashes(conn, cursor):
                     fname = os.path.basename(path_str)
                     if len(fname) > 20:
                         fname = fname[:17] + "..."
-                    print_progress(processed_candidates, total_candidates, prefix='Hashing:', suffix=f'{fname}', length=30)
+                    print_progress(processed_candidates, total_candidates, prefix=HASH_PROGRESS_PREFIX, suffix=f'{fname}', length=30)
                 continue
 
             for path_str in pending_paths:
@@ -376,7 +378,7 @@ def _phase_calculate_hashes(conn, cursor):
                 fname = os.path.basename(path_str)
                 if len(fname) > 20:
                     fname = fname[:17] + "..."
-                print_progress(processed_candidates, total_candidates, prefix='Hashing:', suffix=f'{fname}', length=30)
+                print_progress(processed_candidates, total_candidates, prefix=HASH_PROGRESS_PREFIX, suffix=f'{fname}', length=30)
 
                 full_hash = calcular_hash_completo(path_str)
                 if full_hash is None:
@@ -387,7 +389,7 @@ def _phase_calculate_hashes(conn, cursor):
 
         conn.commit()
 
-    print_progress(total_candidates, total_candidates, prefix='Hashing:', suffix='Completado', length=30)
+    print_progress(total_candidates, total_candidates, prefix=HASH_PROGRESS_PREFIX, suffix='Completado', length=30)
     print()
     print(f"   -> Hashes completos calculados: {hashes_calculated}")
 
@@ -398,6 +400,20 @@ def _hash_tag_for_filename(file_hash):
         unsigned = file_hash & INT64_MASK
         return f"{unsigned:016x}"[:8]
     return str(file_hash)[:8]
+
+
+def _files_are_identical(path_a, path_b):
+    try:
+        with open(path_a, "rb") as file_a, open(path_b, "rb") as file_b:
+            while True:
+                chunk_a = file_a.read(FILE_COMPARE_CHUNK_SIZE)
+                chunk_b = file_b.read(FILE_COMPARE_CHUNK_SIZE)
+                if chunk_a != chunk_b:
+                    return False
+                if not chunk_a:
+                    return True
+    except OSError:
+        return None
 
 
 def _sort_duplicate_candidates(candidates, script_path):
@@ -459,18 +475,18 @@ def _move_or_delete_duplicate(mover_a, borrar_realmente, file_hash, archivo_dele
 def _phase_deduplicate(conn, cursor, mover_a, borrar_realmente, script_path):
     print(">> FASE 4: Analizando duplicados...")
     cursor.execute(
-        "SELECT hash, count(*) as cnt FROM files "
+        "SELECT hash, size, count(*) as cnt FROM files "
         "WHERE hash IS NOT NULL "
         "AND hash_error = 0 "
-        "GROUP BY hash HAVING cnt > 1"
+        "GROUP BY hash, size HAVING cnt > 1"
     )
     duplicate_blocks = cursor.fetchall()
 
     contador_duplicados = 0
     espacio_liberado = 0
 
-    for (file_hash, _) in duplicate_blocks:
-        cursor.execute("SELECT path, mtime, size FROM files WHERE hash = ?", (file_hash,))
+    for (file_hash, file_size, _) in duplicate_blocks:
+        cursor.execute("SELECT path, mtime, size FROM files WHERE hash = ? AND size = ?", (file_hash, file_size))
         candidates = [
             {'path': Path(p_str), 'mtime': m_time, 'size': f_size}
             for (p_str, m_time, f_size) in cursor.fetchall()
@@ -486,6 +502,14 @@ def _phase_deduplicate(conn, cursor, mover_a, borrar_realmente, script_path):
         for item in to_delete:
             archivo_delete = item['path']
             print(f"  Procesar:  {archivo_delete.name}")
+
+            files_match = _files_are_identical(keeper['path'], archivo_delete)
+            if files_match is None:
+                print("  Acción:    ERROR COMPARANDO CONTENIDO ❌")
+                continue
+            if not files_match:
+                print("  Acción:    COLISIÓN DE HASH DETECTADA, SE CONSERVAN AMBOS ⚠️")
+                continue
 
             accion_exitosa = False
             try:
