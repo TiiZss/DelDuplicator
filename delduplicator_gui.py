@@ -4,18 +4,25 @@
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
-import subprocess
+# Uso intencional para ejecutar scripts locales controlados.
+import subprocess  # nosec B404
+import codecs
 import threading
 import sys
 import os
-import re
 import signal
+
+APP_VERSION = "3.1.9"
+GUI_SUBVERSION = "GUI.9"
+
 
 class DelDuplicatorGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("DelDuplicator V3 - Interfaz Gráfica Pro")
+        self.root.title(f"DelDuplicator v{APP_VERSION} ({GUI_SUBVERSION}) - Interfaz Gráfica Pro")
         self.root.geometry("850x700")
+        self.current_stage = "Estado: esperando..."
+        self.current_file = ""
         
         style = ttk.Style()
         style.theme_use('clam')
@@ -95,7 +102,19 @@ class DelDuplicatorGUI:
         self.progress_bar.pack(fill="x", padx=20, pady=5)
         self.lbl_percent = ttk.Label(parent, text="0%")
         self.lbl_percent.pack()
-        
+
+        self.lbl_action = ttk.Label(parent, text="Progreso de duplicados", foreground="#5fa9ff", anchor="w", justify="left")
+        self.lbl_action.pack(fill="x", padx=20, pady=(4, 0))
+        self.action_progress_bar = ttk.Progressbar(parent, orient="horizontal", mode="determinate")
+        self.action_progress_bar.pack(fill="x", padx=20, pady=(0, 5))
+        self.lbl_action_percent = ttk.Label(parent, text="0%")
+        self.lbl_action_percent.pack()
+
+        self.lbl_current_file = ttk.Label(parent, text="Estado: esperando...", foreground="#5fa9ff", anchor="w", justify="left")
+        self.lbl_current_file.pack(fill="x", padx=20, pady=(0, 5))
+        self.root.after(0, self._sync_status_wraplength)
+        self.lbl_current_file.bind("<Configure>", self._sync_status_wraplength)
+
         self.toggle_move_entry()
 
     def init_restore_tab(self, parent):
@@ -131,9 +150,16 @@ class DelDuplicatorGUI:
             self.entry_move.config(state='disabled')
             self.btn_move_browse.config(state='disabled')
 
+    def _safe_log_text(self, text):
+        if text is None:
+            return ""
+        text = str(text)
+        return text.encode("utf-8", "replace").decode("utf-8", "replace")
+
     def log(self, text):
+        safe_text = self._safe_log_text(text)
         self.log_text.config(state='normal')
-        self.log_text.insert(tk.END, text + "\n")
+        self.log_text.insert(tk.END, safe_text + "\n")
         self.log_text.see(tk.END)
         self.log_text.config(state='disabled')
         
@@ -186,28 +212,25 @@ class DelDuplicatorGUI:
         self.btn_cancel.config(state='normal')
         self.progress_bar['value'] = 0
         self.lbl_percent['text'] = "0%"
-        
+        self.action_progress_bar['value'] = 0
+        self.lbl_action_percent['text'] = "0%"
+        self.current_stage = "Estado: iniciando..."
+        self.current_file = ""
+        self._refresh_status_label()
+
         threading.Thread(target=self.execute, args=(cmd,), daemon=True).start()
 
     def execute(self, cmd):
         try:
             self.current_process = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, 
-                text=True, bufsize=1, encoding='utf-8', errors='replace',
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=False, bufsize=0,
                 cwd=os.path.dirname(os.path.abspath(__file__))
-            )
-            
-            regex_progress = re.compile(r"\|.*\| (\d+\.?\d*)%")
-            
-            for line in self.current_process.stdout:
-                line_clean = line.strip()
-                if "Hashing: |" in line_clean:
-                    match = regex_progress.search(line_clean)
-                    if match:
-                        p = float(match.group(1))
-                        self.root.after(0, self.update_progress, p)
-                else:
-                    self.root.after(0, self.log, line_clean)
+            )  # nosec B603
+
+            tail = self._consume_process_output(self.current_process.stdout)
+            if tail:
+                self.root.after(0, self._process_output_fragment, tail)
             
             self.current_process.wait()
             self.current_process = None
@@ -218,14 +241,202 @@ class DelDuplicatorGUI:
             self.current_process = None
             self.root.after(0, self.finish_process)
 
+    def _consume_process_output(self, stdout_stream):
+        decoder = codecs.getincrementaldecoder('utf-8')(errors='surrogateescape')
+        buffer = ""
+
+        while True:
+            chunk = stdout_stream.read(1024)
+            if not chunk:
+                break
+
+            buffer += decoder.decode(chunk)
+            buffer = self._flush_output_fragments(buffer)
+
+        buffer += decoder.decode(b"", final=True)
+        return buffer.strip()
+
+    def _flush_output_fragments(self, buffer):
+        while True:
+            cr_index = buffer.find("\r")
+            nl_index = buffer.find("\n")
+
+            if cr_index < 0 and nl_index < 0:
+                return buffer
+
+            if nl_index < 0 or (cr_index >= 0 and cr_index < nl_index):
+                split_index = cr_index
+            else:
+                split_index = nl_index
+
+            fragment = buffer[:split_index]
+            buffer = buffer[split_index + 1:]
+            self._process_output_fragment(fragment)
+
+    def _process_output_fragment(self, fragment):
+        line_clean = fragment.strip()
+        if not line_clean:
+            return
+
+        line_clean = self._safe_log_text(line_clean)
+        if line_clean.startswith(">> FASE 1:"):
+            self.current_phase = "indexando"
+            self.root.after(0, self.set_stage, "Indexando")
+            return
+
+        if line_clean.startswith(">> FASE 2:"):
+            self.current_phase = "limpieza"
+            self.root.after(0, self.set_stage, "Limpiando")
+            self.root.after(0, self.update_progress, 20.0)
+            self.root.after(0, self.update_action_progress, 0.0)
+            return
+
+        if line_clean.startswith(">> FASE 3:"):
+            self.current_phase = "hash"
+            self.root.after(0, self.set_stage, "Hashing")
+            self.root.after(0, self.update_progress, 25.0)
+            self.root.after(0, self.update_action_progress, 0.0)
+            return
+
+        if line_clean.startswith(">> FASE 4:"):
+            self.current_phase = "duplicados"
+            self.root.after(0, self.set_stage, "Analizando duplicados")
+            self.root.after(0, self.update_progress, 85.0)
+            self.root.after(0, self.update_action_progress, 0.0)
+            return
+
+        if line_clean.startswith("--- RESUMEN FINAL ---"):
+            self.current_phase = "finalizando"
+            self.root.after(0, self.set_stage, "Finalizando")
+            self.root.after(0, self.update_progress, 100.0)
+            self.root.after(0, self.update_action_progress, 100.0)
+            return
+
+        if line_clean.startswith("  Procesar:"):
+            self.root.after(0, self.set_current_file, line_clean.split(":", 1)[1].strip())
+            return
+
+        if line_clean.startswith("Hashing: |"):
+            self._handle_hashing_output(line_clean)
+            return
+
+        if line_clean.startswith("Duplicados: |"):
+            self._handle_duplicate_output(line_clean)
+            return
+
+        self.root.after(0, self.log, line_clean)
+
+    def _handle_hashing_output(self, line_clean):
+        percent_value, suffix = self._parse_hashing_output(line_clean)
+        if percent_value is not None:
+            overall = 25.0 + (percent_value * 0.60)
+            self.root.after(0, self.update_progress, overall)
+            self.root.after(0, self.set_stage, "Hashing")
+
+        action_value = self._extract_action_progress(suffix)
+        if action_value is not None:
+            self.root.after(0, self.update_action_progress, action_value)
+        elif suffix == "Completado":
+            self.root.after(0, self.update_action_progress, 100.0)
+        if suffix:
+            self.root.after(0, self.set_current_file, suffix)
+
+    def _handle_duplicate_output(self, line_clean):
+        percent_value, suffix = self._parse_hashing_output(line_clean)
+        if percent_value is not None:
+            overall = 85.0 + (percent_value * 0.15)
+            self.root.after(0, self.update_progress, overall)
+            self.root.after(0, self.set_stage, "Analizando duplicados")
+            self.root.after(0, self.update_action_progress, percent_value)
+
+        if suffix == "Completado":
+            self.root.after(0, self.update_action_progress, 100.0)
+        if suffix:
+            self.root.after(0, self.set_current_file, suffix)
+
+    def _parse_hashing_output(self, line_clean):
+        bar_start = line_clean.find("|")
+        if bar_start < 0:
+            return None, None
+
+        bar_end = line_clean.find("|", bar_start + 1)
+        if bar_end < 0:
+            return None, None
+
+        remainder = line_clean[bar_end + 1 :].strip()
+        if not remainder:
+            return None, None
+
+        parts = remainder.split(None, 1)
+        if not parts:
+            return None, None
+
+        try:
+            percent_value = float(parts[0].rstrip("%"))
+        except ValueError:
+            percent_value = None
+
+        suffix = parts[1].strip() if len(parts) > 1 else ""
+        return percent_value, suffix
+
+    def _extract_action_progress(self, suffix):
+        if not suffix:
+            return None
+
+        percent_marker = suffix.find("[")
+        if percent_marker < 0:
+            return None
+
+        action_tail = suffix[percent_marker + 1 :]
+        action_end = action_tail.find("%]")
+        if action_end < 0:
+            return None
+
+        action_value_text = action_tail[:action_end].strip()
+        try:
+            return float(action_value_text)
+        except ValueError:
+            return None
+
     def update_progress(self, p):
-        self.progress_bar['value'] = p
-        self.lbl_percent['text'] = f"{p:.1f}%"
+        value = max(0.0, min(100.0, float(p)))
+        self.progress_bar['value'] = value
+        self.lbl_percent['text'] = f"{value:.1f}%"
+
+    def update_action_progress(self, p):
+        value = max(0.0, min(100.0, float(p)))
+        self.action_progress_bar['value'] = value
+        self.lbl_action_percent['text'] = f"{value:.1f}%"
+
+    def set_current_file(self, current_file):
+        self.current_file = self._safe_log_text(current_file)
+        self._refresh_status_label()
+
+    def set_stage(self, stage_name):
+        self.current_stage = stage_name
+        self._refresh_status_label()
+
+    def _refresh_status_label(self):
+        if self.current_file:
+            self.lbl_current_file['text'] = f"{self.current_stage} | {self.current_file}"
+        else:
+            self.lbl_current_file['text'] = self.current_stage
+
+    def _sync_status_wraplength(self, event=None):
+        available_width = self.lbl_current_file.winfo_width()
+        if available_width <= 1:
+            available_width = max(self.progress_bar.winfo_width() - 8, 300)
+        self.lbl_current_file.config(wraplength=max(available_width, 300))
 
     def finish_process(self):
         self.btn_run.config(state='normal')
         self.btn_restore.config(state='normal')
         self.btn_cancel.config(state='disabled')
+        self.current_stage = "Estado: finalizado"
+        self.current_file = ""
+        self.update_progress(100.0)
+        self.update_action_progress(100.0)
+        self._refresh_status_label()
         self.log("--- FINALIZADO ---")
         messagebox.showinfo("Info", "Proceso completado.")
 

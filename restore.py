@@ -2,10 +2,53 @@
 # dependencies = []
 # ///
 
+import argparse
 import os
 import shutil
-import argparse
 from pathlib import Path
+
+
+def _is_within(base_path, candidate_path):
+    try:
+        return candidate_path.resolve(strict=False).is_relative_to(base_path.resolve(strict=False))
+    except AttributeError:
+        base_resolved = base_path.resolve(strict=False)
+        candidate_resolved = candidate_path.resolve(strict=False)
+        return str(candidate_resolved).startswith(str(base_resolved) + os.sep)
+
+
+def _parse_restore_line(linea):
+    partes = linea.split(" | ", 2)
+    if len(partes) != 3:
+        return None
+    return Path(partes[1]), Path(partes[2])
+
+
+def _restore_entry(ruta_log, src_original, dst_actual):
+    if not _is_within(ruta_log.parent, dst_actual):
+        print(f"[SKIP] Destino fuera de cuarentena: {dst_actual}")
+        return False
+
+    if not dst_actual.exists():
+        print(f"[MISSING] No existe en cuarentena: {dst_actual.name}")
+        return False
+
+    try:
+        if not src_original.parent.exists():
+            src_original.parent.mkdir(parents=True, exist_ok=True)
+
+        shutil.move(str(dst_actual), str(src_original))
+        print(f"[OK] Restaurado: {src_original.name}")
+
+        try:
+            dst_actual.parent.rmdir()
+        except OSError:
+            pass
+
+        return True
+    except Exception as e:
+        print(f"[ERROR] Falló mover {dst_actual} -> {src_original}: {e}")
+        return False
 
 def restaurar_archivos(log_path):
     ruta_log = Path(log_path).resolve()
@@ -15,7 +58,6 @@ def restaurar_archivos(log_path):
 
     print(f"--- Iniciando Restauración desde: {ruta_log.name} ---")
     
-    lineas_ok = []
     lineas_fail = []
     lineas_restauradas = 0
     
@@ -30,39 +72,17 @@ def restaurar_archivos(log_path):
         if not linea: continue
         
         # Formato: FECHA | ORIGEN | DESTINO
-        partes = linea.split(" | ")
-        if len(partes) < 3:
+        parsed_line = _parse_restore_line(linea)
+        if parsed_line is None:
             print(f"[SKIP] Formato inválido: {linea}")
             lineas_fail.append(linea)
             continue
-            
-        src_original = Path(partes[1])
-        dst_actual = Path(partes[2])
-        
-        if dst_actual.exists():
-            try:
-                # Crear carpeta padre original si no existe
-                if not src_original.parent.exists():
-                    src_original.parent.mkdir(parents=True, exist_ok=True)
-                
-                # Mover de vuelta
-                shutil.move(str(dst_actual), str(src_original))
-                print(f"[OK] Restaurado: {src_original.name}")
-                lineas_restauradas += 1
-                
-                # Intentar borrar carpeta contenedora de destino si quedó vacía
-                try:
-                    dst_actual.parent.rmdir() # Solo borra si está vacía
-                except OSError: pass
-                
-            except Exception as e:
-                print(f"[ERROR] Falló mover {dst_actual} -> {src_original}: {e}")
-                lineas_fail.append(linea)
+
+        src_original, dst_actual = parsed_line
+        if _restore_entry(ruta_log, src_original, dst_actual):
+            lineas_restauradas += 1
         else:
-            print(f"[MISSING] No existe en cuarentena: {dst_actual.name}")
-            # Si no existe, no podemos restaurar, pero tampoco mantenemos la línea
-            # O quizás sí para auditoría? Asumimos que ya fue gestionado manualmente.
-            lineas_fail.append(linea) 
+            lineas_fail.append(linea)
 
     print("\n--- Resumen ---")
     print(f"Restaurados: {lineas_restauradas}/{total}")

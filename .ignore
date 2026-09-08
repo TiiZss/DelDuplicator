@@ -1,0 +1,4 @@
+# Keep the checked-in graft cards searchable while excluding generated cache files.
+!graft/
+graft/.cache/
+graft/.graph/

@@ -20,3 +20,18 @@ ignore_me.log
 dist/
 build/
 *.spec
+
+# Graft source cards are versioned and kept searchable; only generated cache files are disposable.
+graft/.cache/
+graft/.graph/
+
+# Local tooling and ephemeral workspace state.
+.claude/
+.cursor/
+.gemini/
+.kiro/
+.windsurf/
+.adal/
+.adal/**
+opencode.json
+.tmp_test_dd/
