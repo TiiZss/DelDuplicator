@@ -1,4 +1,4 @@
-# TROUBLESHOOTING
+# Troubleshooting
 
 ## 1) El comando `graft` no funciona
 

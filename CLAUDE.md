@@ -18,7 +18,7 @@ Las carpetas almacenan informacion; este mapa define como interpretarlas y usarl
 3. Implementar en rama dedicada por funcionalidad.
 4. Ejecutar pruebas y auditoria de seguridad segun aplique.
 5. Corregir errores del panel Problems antes de publicar.
-6. Alinear documentacion (README, CHANGELOG, KANBAN, ARCHITECTURE, TROUBLESHOOTING, graft si aplica).
+6. Alinear documentacion (README, CHANGELOG, docs/kanban.md, docs/architecture.md, docs/troubleshooting.md, graft si aplica).
 7. Preparar tag y release cuando se publique en GitHub.
 
 ## 3) Python

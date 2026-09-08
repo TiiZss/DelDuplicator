@@ -20,19 +20,19 @@
 
 ## 2026-09-07 - Checklist pre-release en Kanban
 
-- Decision: incorporar una lista de verificacion pre-release (Definition of Done) en KANBAN.md.
+- Decision: incorporar una lista de verificacion pre-release (Definition of Done) en docs/kanban.md.
 - Motivo: estandarizar calidad minima antes de publicar cambios.
 - Impacto: reduce regresiones y asegura alineacion de pruebas, seguridad y documentacion.
 
 ## 2026-09-07 - Plantilla reutilizable por rama feature
 
-- Decision: agregar una plantilla de feature en KANBAN.md para copiar por funcionalidad.
+- Decision: agregar una plantilla de feature en docs/kanban.md para copiar por funcionalidad.
 - Motivo: uniformar trazabilidad por rama y facilitar auditoria tecnica.
 - Impacto: mejora consistencia de entrega y evidencia de calidad por feature.
 
 ## 2026-09-07 - Primera instancia de feature creada
 
-- Decision: crear la primera instancia `workflow-governance-baseline` en KANBAN.md.
+- Decision: crear la primera instancia `workflow-governance-baseline` en docs/kanban.md.
 - Motivo: activar uso real de la plantilla por rama y no dejarla solo como formato.
 - Impacto: el equipo ya tiene un registro operativo con checklist y evidencias pendientes.
 

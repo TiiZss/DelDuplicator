@@ -8,8 +8,10 @@
 - CLI: aplicado filtrado real de extensiones para `--include` y `--exclude`.
 - Mantenibilidad: refactor de `escanear_y_eliminar` en helpers por fases para reducir complejidad cognitiva.
 - Seguridad: eliminado hallazgo medium de Bandit al reemplazar SQL `f-string` por string literal.
+- Seguridad: endurecida la restauración para rechazar `restore_log.txt` manipulados fuera de la cuarentena generada por el propio programa.
 - Robustez: reemplazado `except` generico por `except OSError` en escritura de `restore_log`.
 - Seguridad GUI: revisado uso de `subprocess` y cerrados hallazgos low de Bandit con anotaciones auditadas.
+- GUI: barra de progreso general + barra de accion por archivo, texto azul sin recorte y versionada a v3.1.9 (GUI.9).
 
 ### Added - Unreleased
 
@@ -18,9 +20,9 @@
   - `MEMORY.md`
   - `LEARNINGS.md`
   - `decisions.md`
-  - `KANBAN.md`
-  - `ARCHITECTURE.md`
-  - `TROUBLESHOOTING.md`
+  - `docs/kanban.md`
+  - `docs/architecture.md`
+  - `docs/troubleshooting.md`
 
 ## [v3.0.0] - 2026-01-18 (SQLite Edition)
 

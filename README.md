@@ -69,9 +69,9 @@ Este repositorio incluye un mapa operativo y metadatos de trabajo para agentes:
 * `MEMORY.md`: contexto duradero del proyecto.
 * `LEARNINGS.md`: lecciones aprendidas verificadas.
 * `decisions.md`: registro auditable de decisiones.
-* `KANBAN.md`: estado de trabajo por columnas.
-* `ARCHITECTURE.md`: visión de componentes y principios.
-* `TROUBLESHOOTING.md`: incidencias frecuentes y resolución.
+* `docs/kanban.md`: estado de trabajo por columnas.
+* `docs/architecture.md`: visión de componentes y principios.
+* `docs/troubleshooting.md`: incidencias frecuentes y resolución.
 
 Recomendación para ejecución Python con dependencias: priorizar `uv run` sobre llamadas directas a `python`.
 

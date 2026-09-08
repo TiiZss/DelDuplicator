@@ -31,4 +31,7 @@ graft/.graph/
 .gemini/
 .kiro/
 .windsurf/
+.adal/
+.adal/**
+opencode.json
 .tmp_test_dd/
